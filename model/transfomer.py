@@ -11,7 +11,7 @@ class PositionalEncoding(nn.Module):
 
         # 预训练旋转位置编码参数，注册为buffer（不参与训练）
         pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float16).unsqueeze(1)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() *
                              (-math.log(10000) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
@@ -23,9 +23,9 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         if x.size(1) > self.pe.size(1):
             pe = torch.zeros(x.size(1), self.pe.size(-1), device=x.device)
-            position = torch.arange(0, x.size(1), dtype=torch.float16).unsqueeze(1)
+            position = torch.arange(0, x.size(1), dtype=torch.float32).unsqueeze(1)
             div_term = torch.exp(torch.arange(0, self.pe.size(-1), 2, device=x.device).float() *
-                                (-math.log(10000) * self.pe.size(-1)))
+                                (-math.log(10000) / self.pe.size(-1)))
             pe[:, 0::2] = torch.sin(position * div_term)
             pe[:, 1::2] = torch.cos(position * div_term)
             # pe形状()
@@ -106,7 +106,11 @@ class AddNorm(nn.Module):
     def forward(self, res, x):
         return self.ln(res + self.dropout(x))
 
+
 class EncoderLayer(nn.Module):
+    """
+        MulHeadAttention -> AddNorm -> FFN -> AddNorm
+    """
     def __init__(self, d_model, d_ffn, num_heads, dropout=0.1):
         super().__init__()
         self.atten = MulHeadAttention(d_model, num_heads, dropout)
@@ -119,28 +123,71 @@ class EncoderLayer(nn.Module):
         x = self.addNorm1(x, att_output)
         ffn_output = self.ffn(x)
         return self.addNorm2(x, ffn_output)
+    
+class DecoderLayer(nn.Module):
+    """
+        MulheadMaskAttiontion -> AddNorm -> CrossAttention -> AddNorm -> FFN -> AddNorm
+    """
+    def __init__(self, d_model, d_ffn, num_heads, dropout=0.1):
+        super().__init__()
+        # 第一层，maskAttention层
+        self.maskAttention = MulHeadAttention(d_model, num_heads, dropout)
+        # 第二层，第一个AddNorm层
+        self.addNorm1 = AddNorm(d_model, dropout)
+        # 第三层，CrossAttention层，我们服用MulHeadAttention
+        self.crossAttention = MulHeadAttention(d_model, num_heads, dropout)
+        # 第四层，第二个AddNorm层
+        self.addNorm2 = AddNorm(d_model, dropout)
+        # 第五层，FFN层
+        self.ffn = FFN(d_model, d_ffn, dropout)
+        # 第六层，最后一层AddNorm层
+        self.addNorm3 = AddNorm(d_model, dropout)
+    
+    def forward(self, x, enc_output, tgt_mask=None, src_mask=None):
+        # x进入先经过maskAttention->addNorm1
+        mask_Attention_output, _ = self.maskAttention(x, x, x, tgt_mask)
+        x = self.addNorm1(x, mask_Attention_output)
+
+        # 在经过crossAttenton与enc_output来计算, 然后在经过AddNorm层
+        cross_attention_output, _ = self.crossAttention(x, enc_output, enc_output, src_mask)
+        x = self.addNorm2(x, cross_attention_output)
+
+        # 最后经过FFN层和AddNorm层
+        ffn_output = self.ffn(x)
+        x = self.addNorm3(x, ffn_output)
+
+        # 最后返回值
+        return x
+
+
 
 if __name__ == "__main__":
     x = torch.rand(10, 100, 512)
 
-    # # 测试MulHeadAttention 输入(batch_size, num, d_model)->(batch, num, d_modle)
-    att = MulHeadAttention(512)
-    y, att_weights= att(x, x, x)
-    print("y形状:", y.shape)
-    print("y内容:", y, "\nweights：", att_weights)
+    # # # 测试MulHeadAttention 输入(batch_size, num, d_model)->(batch, num, d_modle)
+    # att = MulHeadAttention(512)
+    # y, att_weights= att(x, x, x)
+    # print("y形状:", y.shape)
+    # print("y内容:", y, "\nweights：", att_weights)
     
-    # 测试PositionalEncoding 输入(batch_size, num, d_model)
-    pe = PositionalEncoding(512)
-    out = pe(x)
+    # # 测试PositionalEncoding 输入(batch_size, num, d_model)
+    # pe = PositionalEncoding(512)
+    # out = pe(x)
+    # print("out：", out, "\noutshape:", out.shape)
+
+    # # 测试FFN 输入(batch, num, d_modle)->(batch, num, d_modle)
+    # ffn = FFN(512, 2048)
+    # out = ffn(x)
+    # print("out：", out, "\noutshape:", out.shape)
+
+    # # 测试AddNorm 输入(batch, num, d_modle)->(batch, num, d_modle)
+    # an = AddNorm(512)
+    # out = an(x, x)
+    # print("out：", out, "\noutshape:", out.shape)
+
+    # EncoderLayer层测试
+    encoderlayer = EncoderLayer(512, 2048, 8)
+    out = encoderlayer(x)
     print("out：", out, "\noutshape:", out.shape)
 
-    # 测试FFN 输入(batch, num, d_modle)->(batch, num, d_modle)
-    ffn = FFN(512, 2048)
-    out = ffn(x)
-    print("out：", out, "\noutshape:", out.shape)
-
-    # 测试AddNorm 输入(batch, num, d_modle)->(batch, num, d_modle)
-    an = AddNorm(512)
-    out = an(x, x)
-    print("out：", out, "\noutshape:", out.shape)
     exit()
